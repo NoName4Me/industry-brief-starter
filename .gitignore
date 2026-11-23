@@ -1,0 +1,32 @@
+node_modules/
+.next/
+docs-site/
+.env
+.env.*
+!.env.example
+.data/
+*.tsbuildinfo
+.DS_Store
+
+# Local diagnostics and reports
+*.log
+coverage/
+playwright-report/
+test-results/
+
+# Credentials and local database backups
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite
+*.sqlite3
+*.dump
+*.bak
+*.tar.gz
+
+# Production deployment state and private backups
+/deploy/.state/
+/deploy/backups/
+
+__pycache__/

@@ -1,0 +1,201 @@
+import { Suspense } from 'react';
+import { FilePlus2, RotateCw, Settings2, ListFilter, RefreshCw } from 'lucide-react';
+import { redirect } from 'next/navigation';
+import Link from 'next/link';
+import { getSettings } from '../../../server/settings.ts';
+import { TaskSettingsForm } from '../../../components/settings-forms.tsx';
+import { SourceManagementDialog } from '../../../components/source-management-dialog.tsx';
+import { requireAdmin } from '../../../server/auth.ts';
+import { Notice, type Query } from '../../../components/notice.tsx';
+import { taskOverview } from '../../../server/admin-tasks.ts';
+import { taskStatusGroup, taskStatusGroups, taskTypes } from '../../../server/admin-task-labels.ts';
+import { BatchTaskRow } from '../../../components/batch-task-row.tsx';
+import { TaskRow } from '../../../components/task-row.tsx';
+import { Reprocessing } from '../../../components/reprocessing.tsx';
+import { ManualImport } from '../../../components/manual-import.tsx';
+export const metadata = { title: '任务管理' };
+export default async function Tasks({ searchParams }: { searchParams: Promise<Query> }) {
+  await requireAdmin();
+  const query = await searchParams;
+  const q = typeof query.q === 'string' ? query.q : '';
+  const type = typeof query.type === 'string' && query.type in taskTypes ? query.type : '';
+  const status = typeof query.state === 'string' ? taskStatusGroup(query.state) : undefined;
+  const state = status?.value ?? '';
+  const page = Math.max(1, Math.min(1000000, Number.parseInt(String(query.page), 10) || 1));
+  const params = new URLSearchParams({
+    q,
+    type,
+    state,
+    ...(page > 1 ? { page: String(page) } : {}),
+  });
+  return (
+    <>
+      <Notice query={query} />
+      <div className="admin-page-actions task-management-actions">
+        <Link
+          className="outline-button"
+          href={`/admin/articles?${params}&configure=import`}
+          scroll={false}
+        >
+          <FilePlus2 className="icon" strokeWidth={1.75} aria-hidden="true" />
+          手工录入资讯
+        </Link>
+        <Link
+          className="solid-button"
+          href={`/admin/articles?${params}&configure=reprocess`}
+          scroll={false}
+        >
+          <RotateCw className="icon" strokeWidth={1.75} aria-hidden="true" />
+          批量重新处理
+        </Link>
+        <Link
+          className="outline-button"
+          href={`/admin/articles?${params}&configure=tasks`}
+          scroll={false}
+        >
+          <Settings2 className="icon" strokeWidth={1.75} aria-hidden="true" />
+          任务处理配置
+        </Link>
+      </div>
+      {query.configure === 'import' && (
+        <SourceManagementDialog title="手工录入资讯" closeHref={`/admin/articles?${params}`}>
+          <ManualImport />
+        </SourceManagementDialog>
+      )}
+      {query.configure === 'tasks' && (
+        <SourceManagementDialog title="任务处理配置" closeHref={`/admin/articles?${params}`}>
+          <Suspense fallback={<p role="status">正在加载任务配置…</p>}>
+            <TaskConfiguration />
+          </Suspense>
+        </SourceManagementDialog>
+      )}
+      {query.configure === 'reprocess' && (
+        <SourceManagementDialog title="批量重新处理" closeHref={`/admin/articles?${params}`}>
+          <Reprocessing />
+        </SourceManagementDialog>
+      )}
+      <form className="inline-form task-filters" aria-label="任务筛选">
+        <label>
+          <select aria-label="任务类型" name="type" defaultValue={type}>
+            <option value="">全部类型</option>
+            {Object.entries(taskTypes).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <select aria-label="状态" name="state" defaultValue={state}>
+            <option value="">全部状态</option>
+            {taskStatusGroups.map(({ value, label }) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <input
+            aria-label="任务名"
+            name="q"
+            type="search"
+            maxLength={200}
+            defaultValue={q}
+            placeholder="搜索信源、资讯或刊期"
+          />
+        </label>
+        <button className="solid-button">
+          <ListFilter className="icon" strokeWidth={1.75} aria-hidden="true" />
+          筛选
+        </button>
+        <Link href={`/admin/articles?${params}`} className="outline-button">
+          <RefreshCw className="icon" strokeWidth={1.75} aria-hidden="true" />
+          刷新
+        </Link>
+      </form>
+
+      <Suspense
+        key={`${q}:${type}:${state}:${page}`}
+        fallback={
+          <div className="table-wrap" aria-busy="true" aria-label="任务列表">
+            <p role="status">正在加载任务列表…</p>
+          </div>
+        }
+      >
+        <TaskResults q={q} type={type} status={status} page={page} batch={query.batch} />
+      </Suspense>
+    </>
+  );
+}
+
+async function TaskConfiguration() {
+  return <TaskSettingsForm config={await getSettings()} />;
+}
+async function TaskResults({
+  q,
+  type,
+  status,
+  page,
+  batch,
+}: {
+  q: string;
+  type: string;
+  status: ReturnType<typeof taskStatusGroup>;
+  page: number;
+  batch: Query['batch'];
+}) {
+  const state = status?.value ?? '';
+  const tasks = await taskOverview(q, type, status?.states, page, 50);
+  if (!tasks.length && page > 1) {
+    const first = await taskOverview(q, type, status?.states, 1, 50);
+    const last = Math.max(1, Math.ceil((first[0]?.total_count ?? 0) / 50));
+    redirect(`/admin/articles?${new URLSearchParams({ q, type, state, page: String(last) })}`);
+  }
+  const total = tasks[0]?.total_count ?? 0;
+  const pages = Math.max(1, Math.ceil(total / 50));
+  const pageHref = (value: number) =>
+    `/admin/articles?${new URLSearchParams({ q, type, state, page: String(value) })}`;
+  return (
+    <>
+      <div className="table-wrap">
+        <table className="managed-task-table" aria-label="任务列表">
+          <thead>
+            <tr>
+              <th>任务类型</th>
+              <th>任务名</th>
+              <th>开始时间</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tasks.map((task) =>
+              task.queue === 'reprocess' ? (
+                <BatchTaskRow key={task.id} task={task} initiallyOpen={batch === task.target_id} />
+              ) : (
+                <TaskRow key={task.id} task={task} />
+              ),
+            )}
+          </tbody>
+        </table>
+      </div>
+      <nav className="pagination" aria-label="任务分页">
+        <span>
+          共{total}条 · 第{page}/{pages}页
+        </span>
+        {page > 1 ? (
+          <Link href={pageHref(page - 1)}>上一页</Link>
+        ) : (
+          <span aria-disabled="true">上一页</span>
+        )}
+        {page < pages ? (
+          <Link href={pageHref(page + 1)}>下一页</Link>
+        ) : (
+          <span aria-disabled="true">下一页</span>
+        )}
+      </nav>
+      {!tasks.length && <p className="empty-state">暂无匹配的任务。</p>}
+    </>
+  );
+}

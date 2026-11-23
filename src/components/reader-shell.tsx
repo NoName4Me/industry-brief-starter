@@ -1,0 +1,70 @@
+import Link from 'next/link';
+import { listPublished } from '../server/publication.ts';
+import { type Kind } from '../server/types.ts';
+import { editionCalendar, groupIssues, weekday } from '../server/brief-presentation.ts';
+export async function ReaderShell({
+  children,
+  kind = 'daily',
+  currentId,
+}: {
+  children: React.ReactNode;
+  kind?: Kind;
+  currentId?: string;
+}) {
+  const groups = groupIssues(await listPublished(kind), kind);
+  return (
+    <div className="shell reader-shell">
+      <aside className="sidebar" aria-label="简报归档">
+        <div className="issue-groups">
+          {groups.map((group) => (
+            <details
+              className="issue-group"
+              key={group.key}
+              open={group.open || group.items.some((issue) => issue.id === currentId)}
+            >
+              <summary>{group.label}</summary>
+              {group.items.map((issue) => {
+                const calendar = issue.content
+                  ? editionCalendar(kind, issue.periodDate, issue.content)
+                  : null;
+                const [weekStart, weekEnd] = calendar?.detail.split('-') ?? [];
+                return (
+                  <Link
+                    key={issue.id}
+                    href={`/briefs/${issue.id}`}
+                    className={`period-link ${issue.id === currentId ? 'current' : ''}`}
+                    aria-current={issue.id === currentId ? 'page' : undefined}
+                  >
+                    <div
+                      className={`period-calendar ${kind === 'weekly' ? 'period-calendar-weekly' : ''}`}
+                    >
+                      {kind === 'weekly' && <span className="period-range-start">{weekStart}</span>}
+                      <div className="period-day">
+                        {calendar?.number ?? issue.periodDate.slice(-2)}
+                      </div>
+                      {kind === 'weekly' ? (
+                        <span className="period-range-end">{weekEnd}</span>
+                      ) : (
+                        <div className="period-month">
+                          {kind === 'monthly' ? '月' : weekday(issue.periodDate)}
+                        </div>
+                      )}
+                    </div>
+                    <div className="period-name">{issue.content?.title ?? '未命名简报'}</div>
+                  </Link>
+                );
+              })}
+            </details>
+          ))}
+        </div>
+        {!groups.length && (
+          <p className="muted">{kind === 'monthly' ? '暂无正式月报' : '暂无正式出刊'}</p>
+        )}
+        <div className="side-footer">
+          <Link href="/archive">查看全部</Link>
+        </div>
+      </aside>
+      <main className="main">{children}</main>
+    </div>
+  );
+}

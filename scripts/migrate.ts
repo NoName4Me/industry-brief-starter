@@ -1,0 +1,78 @@
+import { mailConnectionFromEnvironment } from '../src/server/mail-connection.ts';
+import { readdir, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { pool } from '../src/server/db.ts';
+import { defaultSettings } from '../src/server/types.ts';
+export async function migrate() {
+  const client = await pool.connect();
+  try {
+    await client.query('SELECT pg_advisory_lock(76140501)');
+    await client.query(
+      'CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())',
+    );
+    for (const name of (await readdir('database/migrations'))
+      .filter((v) => v.endsWith('.sql'))
+      .sort()) {
+      const sql = await readFile(`database/migrations/${name}`, 'utf8');
+      const checksum = createHash('sha256').update(sql).digest('hex');
+      const old = await client.query('SELECT checksum FROM schema_migrations WHERE name=$1', [
+        name,
+      ]);
+      if (old.rows.length) {
+        if (old.rows[0].checksum !== checksum) throw new Error(`已应用迁移被修改：${name}`);
+        continue;
+      }
+      if (
+        name === '0001_baseline.sql' &&
+        (await client.query("SELECT to_regclass('public.industries') IS NOT NULL AS initialized"))
+          .rows[0].initialized
+      )
+        throw new Error('模板初始化需要空数据库。现有数据库请使用其原项目的迁移记录。');
+      await client.query('BEGIN');
+      try {
+        await client.query(sql);
+        await client.query('INSERT INTO schema_migrations(name,checksum) VALUES($1,$2)', [
+          name,
+          checksum,
+        ]);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      }
+      console.log(`Applied ${name}`);
+    }
+    await client.query('INSERT INTO settings(id,value) VALUES(1,$1) ON CONFLICT DO NOTHING', [
+      JSON.stringify(defaultSettings),
+    ]);
+    // Import legacy deployment configuration once; subsequent edits belong to the admin UI.
+    await client.query(
+      "UPDATE settings SET value=jsonb_set(value,'{modelConnection}',$1::jsonb) WHERE id=1 AND NOT value ? 'modelConnection' AND NOT value ? 'modelConnections'",
+      [
+        JSON.stringify({
+          enabled: process.env.MODEL_CALLS_ENABLED === 'true',
+          baseUrl: process.env.LLM_BASE_URL?.trim() ?? '',
+          apiKey: process.env.LLM_API_KEY?.trim() ?? '',
+          model: process.env.LLM_MODEL?.trim() ?? '',
+        }),
+      ],
+    );
+    await client.query(
+      `UPDATE settings SET value=value || jsonb_build_object(
+        'mailConnection',$1::jsonb,
+        'deliveryEnabled',coalesce((value->>'deliveryEnabled')::boolean,true) AND $2::boolean
+      ) WHERE id=1 AND NOT value ? 'mailConnection'`,
+      [JSON.stringify(mailConnectionFromEnvironment()), process.env.MAIL_ENABLED === 'true'],
+    );
+  } finally {
+    await client.query('SELECT pg_advisory_unlock(76140501)');
+    client.release();
+  }
+}
+if (import.meta.url === `file://${process.argv[1]}`) {
+  try {
+    await migrate();
+  } finally {
+    await pool.end();
+  }
+}

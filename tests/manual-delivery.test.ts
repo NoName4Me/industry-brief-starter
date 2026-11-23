@@ -1,0 +1,270 @@
+import { syncMailSettings } from './mail-settings-fixture.ts';
+import { test, before, beforeEach, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
+import { db, pool } from '../src/server/db.ts';
+import { briefs, deliveries, subscriptions } from '../src/server/schema.ts';
+import { migrate } from './database-fixture.ts';
+import { fixtureContent } from './fixtures.ts';
+import { subscribe, unsubscribe } from '../src/server/subscriptions.ts';
+import { requestManualDelivery } from '../src/server/manual-delivery.ts';
+import { createDeliveries } from '../src/server/delivery-outbox.ts';
+
+if (!process.env.DATABASE_URL || !/_test$/.test(new URL(process.env.DATABASE_URL).pathname))
+  throw new Error('测试必须连接独立 _test 数据库');
+let briefId: string;
+before(async () => {
+  await migrate();
+});
+beforeEach(async () => {
+  await pool.query('TRUNCATE deliveries, subscriptions, briefs CASCADE');
+  process.env.MAIL_ENABLED = 'true';
+  process.env.SMTP_HOST = 'smtp.example.invalid';
+  process.env.SMTP_PORT = '465';
+  process.env.SMTP_SECURE = 'true';
+  process.env.SMTP_USER = 'sender@example.invalid';
+  process.env.SMTP_PASSWORD = 'test-only';
+  process.env.MAIL_FROM = 'sender@example.invalid';
+  process.env.APP_SECRET = 'test-only-32-character-secret-for-mail';
+  process.env.SITE_URL = 'https://brief.example.invalid';
+  briefId = randomUUID();
+  await db
+    .insert(briefs)
+    .values({ id: briefId, kind: 'daily', periodDate: '2026-10-22', published: fixtureContent() });
+  await syncMailSettings();
+});
+after(async () => {
+  await pool.end();
+});
+async function recipient(email: string, kinds = ['daily']) {
+  const token = await subscribe({ email, kinds });
+  const [row] = await db.select().from(subscriptions).where(eq(subscriptions.email, email));
+  return { id: row.id, token: token! };
+}
+test('手动给多个邮箱推送历史刊期，不改变其订阅类型；并发重复提交只创建一次', async () => {
+  const a = await recipient('one@example.invalid');
+  const b = await recipient('two@example.invalid', ['monthly']);
+  const input = { briefId, subscriptionIds: [a.id, b.id, a.id] };
+  const results = await Promise.all([requestManualDelivery(input), requestManualDelivery(input)]);
+  assert.equal(
+    results.reduce((n, r) => n + r.created, 0),
+    2,
+  );
+  assert.equal(
+    results.reduce((n, r) => n + r.skipped, 0),
+    2,
+  );
+  const rows = await db.select().from(deliveries);
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((r) => r.state === 'pending' && r.briefId === briefId));
+  assert.deepEqual(
+    (await db.select().from(subscriptions).where(eq(subscriptions.id, b.id)))[0].kinds,
+    ['monthly'],
+  );
+});
+test('退订或不存在的邮箱使整批操作失败；草稿不可发送', async () => {
+  const a = await recipient('one@example.invalid');
+  const b = await recipient('two@example.invalid');
+  await unsubscribe(b.token);
+  for (const id of [b.id, randomUUID()])
+    await assert.rejects(
+      requestManualDelivery({ briefId, subscriptionIds: [a.id, id] }),
+      /退订或删除/,
+    );
+  await db
+    .update(briefs)
+    .set({ published: null, draft: fixtureContent() })
+    .where(eq(briefs.id, briefId));
+  await assert.rejects(requestManualDelivery({ briefId, subscriptionIds: [a.id] }), /已发布/);
+  assert.equal((await db.select().from(deliveries)).length, 0);
+});
+test('发信未开启或配置不全不会入队', async () => {
+  const a = await recipient('one@example.invalid');
+  const input = { briefId, subscriptionIds: [a.id] };
+  process.env.MAIL_ENABLED = 'false';
+  await syncMailSettings();
+  await assert.rejects(requestManualDelivery(input), /推送已暂停/);
+  process.env.MAIL_ENABLED = 'true';
+  await syncMailSettings();
+  process.env.SMTP_HOST = '';
+  await syncMailSettings();
+  await assert.rejects(requestManualDelivery(input), /SMTP 地址/);
+  process.env.SMTP_HOST = 'https://cmail.example.invalid';
+  await syncMailSettings();
+  await assert.rejects(requestManualDelivery(input), /域名/);
+  assert.equal((await db.select().from(deliveries)).length, 0);
+});
+test('手动与自动投递共用去重，不重复发送已发送或结果不明的邮件', async () => {
+  const a = await recipient('one@example.invalid');
+  await db.transaction((tx) => createDeliveries(tx, briefId, 'daily'));
+  for (const state of ['pending', 'sending', 'sent', 'uncertain']) {
+    await db.update(deliveries).set({ state });
+    assert.deepEqual(await requestManualDelivery({ briefId, subscriptionIds: [a.id] }), {
+      created: 0,
+      skipped: 1,
+    });
+  }
+  assert.equal((await db.select().from(deliveries)).length, 1);
+});
+
+test('失败投递允许手动重新推送，并发提交只重新排队一次，自动发布不重试', async () => {
+  const a = await recipient('one@example.invalid');
+  const input = { briefId, subscriptionIds: [a.id] };
+  await requestManualDelivery(input);
+  await db.update(deliveries).set({ state: 'failed', error: '旧连接失败' });
+  await db.transaction((tx) => createDeliveries(tx, briefId, 'daily'));
+  assert.equal((await db.select().from(deliveries))[0].state, 'failed');
+  const results = await Promise.all([requestManualDelivery(input), requestManualDelivery(input)]);
+  assert.equal(
+    results.reduce((n, r) => n + r.created, 0),
+    1,
+  );
+  assert.equal(
+    results.reduce((n, r) => n + r.skipped, 0),
+    1,
+  );
+  const rows = await db.select().from(deliveries);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].state, 'pending');
+  assert.equal(rows[0].error, null);
+  assert.equal(rows[0].sentAt, null);
+});
+
+test('强制推送可重发已发送和结果待确认记录，关闭时保留去重', async () => {
+  const a = await recipient('one@example.invalid');
+  const input = { briefId, subscriptionIds: [a.id] };
+  await requestManualDelivery(input);
+  for (const state of ['sent', 'uncertain']) {
+    await db.update(deliveries).set({ state, sentAt: new Date(), error: '旧记录' });
+    assert.deepEqual(await requestManualDelivery({ ...input, force: false }), {
+      created: 0,
+      skipped: 1,
+    });
+    assert.deepEqual(await requestManualDelivery({ ...input, force: true }), {
+      created: 1,
+      skipped: 0,
+    });
+    const [row] = await db.select().from(deliveries);
+    assert.equal(row.state, 'pending');
+    assert.equal(row.sentAt, null);
+    assert.equal(row.error, null);
+  }
+});
+test('强制推送仍跳过排队中和发送中记录，连续并发提交只重排一次', async () => {
+  const a = await recipient('one@example.invalid');
+  const input = { briefId, subscriptionIds: [a.id], force: true };
+  await requestManualDelivery(input);
+  for (const state of ['pending', 'sending']) {
+    await db.update(deliveries).set({ state });
+    assert.deepEqual(await requestManualDelivery(input), { created: 0, skipped: 1 });
+  }
+  await db.update(deliveries).set({ state: 'sent' });
+  const results = await Promise.all([requestManualDelivery(input), requestManualDelivery(input)]);
+  assert.equal(
+    results.reduce((n, r) => n + r.created, 0),
+    1,
+  );
+  assert.equal(
+    results.reduce((n, r) => n + r.skipped, 0),
+    1,
+  );
+});
+
+test('关闭推送阻止自动创建、手动推送和已排队邮件发送，重新开启后可继续', async () => {
+  const { saveSettingsPatch } = await import('../src/server/settings.ts');
+  const { deliver } = await import('../src/server/mail.ts');
+  const a = await recipient('pause@example.invalid');
+  const input = { briefId, subscriptionIds: [a.id] };
+  const first = await requestManualDelivery(input);
+  assert.equal(first.created, 1);
+  const [queued] = await db.select().from(deliveries);
+  try {
+    await saveSettingsPatch({ deliveryEnabled: false });
+    await deliver(queued.id);
+    const [stillPending] = await db.select().from(deliveries).where(eq(deliveries.id, queued.id));
+    assert.equal(stillPending.state, 'pending');
+    await assert.rejects(requestManualDelivery(input), /推送已暂停/);
+    const b = await recipient('pause-new@example.invalid');
+    await db.transaction((tx) => createDeliveries(tx, briefId, 'daily'));
+    assert.equal(
+      (await db.select().from(deliveries).where(eq(deliveries.subscriptionId, b.id))).length,
+      0,
+    );
+    await saveSettingsPatch({ deliveryEnabled: true });
+    assert.equal((await requestManualDelivery({ briefId, subscriptionIds: [b.id] })).created, 1);
+  } finally {
+    await saveSettingsPatch({ deliveryEnabled: true });
+  }
+});
+
+test('从推送记录重试只重排指定失败记录，并发点击不重复，其他状态拒绝', async () => {
+  const { retryDelivery } = await import('../src/server/manual-delivery.ts');
+  const a = await recipient('retry-one@example.invalid');
+  const b = await recipient('retry-two@example.invalid');
+  await requestManualDelivery({ briefId, subscriptionIds: [a.id, b.id] });
+  await db.update(deliveries).set({ state: 'failed', error: 'EAUTH' });
+  const [first] = await db.select().from(deliveries).where(eq(deliveries.subscriptionId, a.id));
+  const results = await Promise.allSettled([retryDelivery(first.id), retryDelivery(first.id)]);
+  assert.equal(
+    results.reduce((n, r) => n + (r.status === 'fulfilled' ? r.value.created : 0), 0),
+    1,
+  );
+  const [other] = await db.select().from(deliveries).where(eq(deliveries.subscriptionId, b.id));
+  assert.equal(other.state, 'failed');
+  for (const state of ['pending', 'sending', 'sent', 'uncertain']) {
+    await db.update(deliveries).set({ state }).where(eq(deliveries.id, first.id));
+    await assert.rejects(retryDelivery(first.id), /仅支持.*失败/);
+  }
+  await assert.rejects(retryDelivery(randomUUID()), /不存在/);
+});
+
+test('从推送记录重试仍检查推送开关和收件人订阅状态', async () => {
+  const { retryDelivery } = await import('../src/server/manual-delivery.ts');
+  const { saveSettingsPatch } = await import('../src/server/settings.ts');
+  const a = await recipient('retry-guard@example.invalid');
+  await requestManualDelivery({ briefId, subscriptionIds: [a.id] });
+  await db.update(deliveries).set({ state: 'failed' });
+  const [row] = await db.select().from(deliveries);
+  await saveSettingsPatch({ deliveryEnabled: false });
+  await assert.rejects(retryDelivery(row.id), /推送已暂停/);
+  await saveSettingsPatch({ deliveryEnabled: true });
+  await unsubscribe(a.token);
+  await assert.rejects(retryDelivery(row.id), /退订或删除/);
+  assert.equal((await db.select().from(deliveries))[0].state, 'failed');
+});
+
+test('推送记录分页覆盖50条之后的记录，同一时间戳稳定排序并约束异常页码', async () => {
+  const { deliveryHistory } = await import('../src/server/delivery-history.ts');
+  const recipients = await db
+    .insert(subscriptions)
+    .values(
+      Array.from({ length: 55 }, (_, i) => ({
+        email: `page-${i}@example.invalid`,
+        kinds: ['daily'],
+        tokenHash: randomUUID(),
+      })),
+    )
+    .returning();
+  await db.insert(deliveries).values(
+    recipients.map((r) => ({
+      briefId,
+      subscriptionId: r.id,
+      createdAt: new Date('2026-11-12T00:00:00Z'),
+    })),
+  );
+  const first = await deliveryHistory('1');
+  const second = await deliveryHistory('2');
+  assert.equal(first.total, 55);
+  assert.equal(first.pages, 2);
+  assert.equal(first.items.length, 50);
+  assert.equal(second.items.length, 5);
+  assert.equal(new Set([...first.items, ...second.items].map((r) => r.id)).size, 55);
+  assert.deepEqual(
+    (await deliveryHistory(1)).items.map((r) => r.id),
+    first.items.map((r) => r.id),
+  );
+  assert.equal((await deliveryHistory('999')).page, 2);
+  for (const invalid of ['-1', 'NaN', '1.5', ['2'], Infinity])
+    assert.equal((await deliveryHistory(invalid)).page, 1);
+});

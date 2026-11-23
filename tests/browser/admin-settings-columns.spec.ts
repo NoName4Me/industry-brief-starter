@@ -1,0 +1,142 @@
+import { test, expect } from '@playwright/test';
+import { Pool } from 'pg';
+
+test('配置归位、栏目要求与关键词、拖拽保存及轮动自动规则', async ({ page }) => {
+  const db = new Pool({ connectionString: process.env.DATABASE_URL });
+  const original = (await db.query('SELECT value FROM settings WHERE id=1')).rows[0].value;
+  try {
+    await page.goto('/login');
+    await page.getByLabel('管理员密码').fill(process.env.ADMIN_PASSWORD!);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page).toHaveURL(/\/admin$/);
+    await expect(page.getByRole('heading', { name: /异常与待办/ })).toBeVisible();
+    await expect(page.getByText('当前异常信源', { exact: true })).toBeVisible();
+    const nav = page.getByRole('navigation', { name: '管理导航' });
+    await expect(nav.getByRole('link', { name: '系统设置', exact: true })).toBeVisible();
+    await expect(nav.getByRole('link', { name: '出刊设置', exact: true })).toHaveCount(0);
+    await page.goto('/admin/publications');
+    await page.getByRole('link', { name: '出刊设置', exact: true }).click();
+    const publication = page.getByRole('dialog', { name: '出刊设置' });
+    await publication.getByLabel('起刊日期', { exact: true }).fill('2026-10-01');
+    await publication.getByRole('button', { name: '保存' }).click();
+    await expect(publication).toHaveCount(0);
+    await page.goto('/admin/articles');
+    await page.getByRole('link', { name: '任务处理配置', exact: true }).click();
+    const tasks = page.getByRole('dialog', { name: '任务处理配置' });
+    await tasks.getByLabel('资讯处理并发数').fill('4');
+    await tasks.getByRole('button', { name: '保存' }).click();
+    await expect(tasks).toHaveCount(0);
+    await page.goto('/admin/settings');
+    await expect(page.getByLabel('资讯处理并发数')).toHaveCount(0);
+    await expect(page.getByLabel('起刊日期')).toHaveCount(0);
+    await expect(page.getByLabel('原始资讯保留天数')).toBeVisible();
+    await expect(page.getByLabel('每日调用上限')).toHaveCount(0);
+    await page.goto('/admin/models');
+    await page.getByLabel('每日调用上限').fill('101');
+    await page
+      .getByRole('group', { name: '模型调用', exact: true })
+      .getByRole('button', { name: '保存', exact: true })
+      .click();
+    await page.goto('/admin/editorial/columns');
+    await expect(page.getByLabel('政策与监管栏目要求')).not.toHaveValue('');
+    await page.getByLabel('政策与监管辅助关键词').fill('生成式AI；备案');
+    await expect(page.getByLabel('一周观察取材天数')).toHaveCount(0);
+    await expect(page.getByLabel('一周观察排期基准日期')).toHaveCount(0);
+    await page.getByLabel('一周观察间隔周数').fill('2');
+    const rows = page
+      .getByRole('region', { name: '栏目配置', exact: true })
+      .locator('[data-column-id]');
+    const source = rows.last();
+    const movedName = await source.locator('input[aria-label$="名称"]').inputValue();
+    const handle = source.getByRole('button', { name: /排序，使用上下方向键调整/ });
+    await handle.scrollIntoViewIfNeeded();
+    const from = await handle.boundingBox();
+    if (!from) throw new Error('排序手柄不可见');
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2 - 15, { steps: 4 });
+    await rows.first().scrollIntoViewIfNeeded();
+    const target = await rows.first().boundingBox();
+    if (!target) throw new Error('目标栏目不可见');
+    await page.mouse.move(target.x + 30, target.y + 30, { steps: 6 });
+    await page.mouse.up();
+    await expect(rows.first().locator('input[aria-label$="名称"]')).toHaveValue(movedName);
+    await page.getByRole('button', { name: '保存' }).click();
+    await expect(page.getByRole('status')).toHaveText('操作已完成');
+    const saved = (await db.query('SELECT value FROM settings WHERE id=1')).rows[0].value;
+    expect(saved.sections[0].name).toBe(movedName);
+    expect(saved.sections.find((s: { name: string }) => s.name === '政策与监管').keywords).toBe(
+      '生成式AI；备案',
+    );
+    const rotation = saved.sections.find((s: { name: string }) => s.name === '一周观察');
+    expect(rotation.lookbackDays).toBe(14);
+    expect(rotation.anchorDate).toBe('2026-10-01');
+    expect(saved.processingConcurrency).toBe(4);
+    expect(saved.modelDailyLimit).toBe(101);
+    await page.getByRole('button', { name: '关闭通知', exact: true }).click();
+    await page.screenshot({ path: '.data/columns-drag-keywords-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(
+      false,
+    );
+    await page.screenshot({ path: '.data/columns-drag-keywords-mobile.png', fullPage: true });
+    await page.goto('/admin/articles?configure=tasks');
+    await expect(page.getByRole('dialog', { name: '任务处理配置' })).toBeVisible();
+    await page.screenshot({ path: '.data/task-settings-modal-mobile.png', fullPage: true });
+  } finally {
+    await db.query('UPDATE settings SET value=$1 WHERE id=1', [original]);
+    await db.end();
+  }
+});
+
+test('出刊设置双列布局和三个开关可保存并回显', async ({ page }, testInfo) => {
+  const db = new Pool({ connectionString: process.env.DATABASE_URL });
+  const original = (await db.query('SELECT value FROM settings WHERE id=1')).rows[0].value;
+  try {
+    await page.goto('/login');
+    await page.getByLabel('管理员密码').fill(process.env.ADMIN_PASSWORD!);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page).toHaveURL(/\/admin$/);
+    await page.goto('/admin/publications');
+    await page.getByRole('link', { name: '出刊设置', exact: true }).click();
+    const publication = page.getByRole('dialog', { name: '出刊设置' });
+    const startDate = publication.getByLabel('起刊日期', { exact: true });
+    const issueTime = publication.getByLabel('出刊时间', { exact: true });
+    const automatic = publication.getByRole('switch', { name: '自动出刊', exact: true });
+    const weekends = publication.getByRole('switch', { name: '周六、周日不出刊', exact: true });
+    const publish = publication.getByRole('switch', { name: '出刊后直接发布', exact: true });
+    await expect(issueTime).toHaveValue('08:00');
+    await expect(issueTime).not.toBeEditable();
+    await expect(automatic).toBeChecked();
+    await expect(weekends).not.toBeChecked();
+    const wasAutoPublish = await publish.getAttribute('aria-checked');
+    await startDate.fill('2026-10-01');
+    await automatic.click();
+    await weekends.focus();
+    await weekends.press('Space');
+    await publish.click();
+    await expect(weekends).toBeChecked();
+    await publication.screenshot({ path: testInfo.outputPath('publication-settings-desktop.png') });
+    await publication.getByRole('button', { name: '保存' }).click();
+    await expect(publication).toHaveCount(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('link', { name: '出刊设置', exact: true }).click();
+    await expect(automatic).not.toBeChecked();
+    await expect(weekends).toBeChecked();
+    await expect(publish).toHaveAttribute(
+      'aria-checked',
+      wasAutoPublish === 'true' ? 'false' : 'true',
+    );
+    await expect(startDate).toHaveValue('2026-10-01');
+    expect((await startDate.boundingBox())?.y).toBe((await issueTime.boundingBox())?.y);
+    await publication.screenshot({ path: testInfo.outputPath('publication-settings-mobile.png') });
+    await weekends.click();
+    await publication.getByRole('button', { name: '保存' }).click();
+    await expect(publication).toHaveCount(0);
+    await page.getByRole('link', { name: '出刊设置', exact: true }).click();
+    await expect(weekends).not.toBeChecked();
+  } finally {
+    await db.query('UPDATE settings SET value=$1 WHERE id=1', [original]);
+    await db.end();
+  }
+});

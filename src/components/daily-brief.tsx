@@ -1,0 +1,151 @@
+import { publication, publicationName } from '../publication/identity.ts';
+import { rotationText } from '../server/rotation-text.ts';
+import { RotationChart } from './rotation-chart.tsx';
+import { ReaderOutline } from './reader-outline.tsx';
+import type { BriefContent } from '../server/types.ts';
+import { dateLabel } from '../server/periods.ts';
+import { weekday, dailySections, sectionAnchor } from '../server/brief-presentation.ts';
+import { PrintButton } from './print-button.tsx';
+import { PublicationFooter } from './publication-footer.tsx';
+import { SourceRow, Summary } from './brief-story.tsx';
+import { sourceNames } from '../server/source-presentation.ts';
+
+export function DailyBrief({
+  content,
+  date,
+  issueNumber,
+}: {
+  content: BriefContent;
+  date: string;
+  issueNumber?: number | null;
+}) {
+  const sections = dailySections(content);
+  const sources = [
+    ...content.items.flatMap((i) => i.sources),
+    ...(content.rotations ?? []).flatMap((r) => r.sources),
+  ];
+  return (
+    <div className="workspace daily-workspace domain-general">
+      <div className="content-column">
+        <article className="paper report-view">
+          <header className="report-heading edition-heading">
+            <div className="edition-subject">
+              <h1>{content.title}</h1>
+            </div>
+            <div className="edition-meta" aria-label="日报出刊信息">
+              <span className="edition-host">主办：{publication.organizer}</span>
+              <time className="edition-calendar-compact" dateTime={date}>
+                {dateLabel(date)}　{weekday(date).replace('周', '星期')}
+              </time>
+              <p className="edition-number">
+                {`《${publicationName}》${issueNumber ? `第${String(issueNumber).padStart(3, '0')}期` : '待编期'}`}
+              </p>
+              <PrintButton />
+            </div>
+          </header>
+          {!!content.highlights?.length && (
+            <section className="edition-overview daily-highlights" id="highlights">
+              <h2>{content.highlightsTitle ?? '今日要览'}</h2>
+              <ol>
+                {content.highlights.map((h, index) => (
+                  <li key={h.eventId}>
+                    <span className="highlight-number" aria-hidden="true">
+                      {String(index + 1).padStart(2, '0')}
+                    </span>
+                    <a href={`#event-${h.eventId}`}>
+                      <span>{h.text}</span>
+                      <svg className="highlight-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M12 5v14m-5-5 5 5 5-5" />
+                      </svg>
+                    </a>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
+          {content.note && <p className="empty-state">{content.note}</p>}
+          {sections.map((group) =>
+            group.kind === 'fixed' ? (
+              <section
+                className="chapter"
+                key={group.name}
+                id={sectionAnchor('general', group.name)}
+              >
+                <header className="chapter-heading">
+                  <h2>{group.name}</h2>
+                  <span>{group.items.length}条</span>
+                </header>
+                <div className="section-stories">
+                  {group.items.map((item, index) => (
+                    <article
+                      className={index === 0 ? 'lead-story' : 'story-item chapter-brief'}
+                      key={item.eventId}
+                      id={`event-${item.eventId}`}
+                    >
+                      <div className="story-copy">
+                        <div className="daily-story-heading">
+                          <h3>{item.title}</h3>
+                        </div>
+                        <p>
+                          <Summary item={item} />
+                        </p>
+                        <SourceRow item={item} />
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            ) : (
+              <section
+                className="chapter daily-rotation"
+                key={group.name}
+                id={`rotation-${group.name}`}
+              >
+                <header className="chapter-heading">
+                  <h2>{group.displayName ?? group.name}</h2>
+                </header>
+                {group.chart && <RotationChart chart={group.chart} />}
+                <p className="rotation-copy">{rotationText(group.text)}</p>
+                <SourceRow
+                  item={{ title: group.displayName ?? group.name, sources: group.sources }}
+                />
+              </section>
+            ),
+          )}
+          <PublicationFooter />
+        </article>
+      </div>
+      <aside className="context" aria-label="日报目录与来源">
+        <div className="context-block">
+          <h2 className="context-head">
+            目录<small>{content.items.length}条资讯</small>
+          </h2>
+          <ReaderOutline
+            items={[
+              ...(content.highlights?.length
+                ? [{ id: 'highlights', label: content.highlightsTitle ?? '今日要览' }]
+                : []),
+              ...sections.map((group) => ({
+                id:
+                  group.kind === 'fixed'
+                    ? sectionAnchor('general', group.name)
+                    : `rotation-${group.name}`,
+                label: group.kind === 'rotation' ? (group.displayName ?? group.name) : group.name,
+              })),
+            ]}
+          />
+        </div>
+        <details className="context-block daily-source-list">
+          <summary className="context-head">
+            <h2>资料来源</h2>
+          </summary>
+          <ul className="source-files">
+            {sourceNames(sources).map((name) => (
+              <li key={name}>{name}</li>
+            ))}
+          </ul>
+        </details>
+      </aside>
+    </div>
+  );
+}

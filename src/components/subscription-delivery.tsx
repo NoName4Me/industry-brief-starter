@@ -1,0 +1,376 @@
+'use client';
+import { useEffect, useId, useRef, useState } from 'react';
+import { useFormStatus } from 'react-dom';
+import Link from 'next/link';
+import {
+  addSubscriberAction,
+  cancelSubscriberAction,
+  deleteExpiredSubscriberAction,
+  manualDeliveryAction,
+  removeSubscriberAction,
+  resendSubscriptionConfirmationAction,
+  retryDeliveryAction,
+} from '../app/actions.ts';
+import { GlobalSwitch } from './global-switch.tsx';
+import { SubscriptionTabs } from './admin-page-tabs.tsx';
+import { MailSettingsForm } from './mail-settings-form.tsx';
+import type { PublicMailConnection } from '../server/mail-connection.ts';
+import { UserPlus, Send, Settings, X } from 'lucide-react';
+
+type Recipient = {
+  id: string | null;
+  email: string;
+  status: 'registered' | 'unsubscribed' | 'pending' | 'expired';
+  at: string;
+  expiresAt?: string;
+};
+type Issue = { id: string; label: string };
+type Send = {
+  id: string;
+  state: string;
+  error: string | null;
+  email: string;
+  issue: string;
+  briefId: string;
+  createdAt: string;
+  recipientActive: boolean;
+};
+function Modal({
+  title,
+  close,
+  children,
+}: {
+  title: string;
+  close: () => void;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  useEffect(() => {
+    ref.current?.showModal();
+  }, []);
+  return (
+    <dialog
+      ref={ref}
+      className="source-dialog source-management-dialog subscription-dialog"
+      aria-labelledby={titleId}
+      onClose={close}
+    >
+      <header className="dialog-header">
+        <h2 id={titleId}>{title}</h2>
+        <button
+          type="button"
+          className="dialog-close"
+          aria-label="关闭"
+          title="关闭"
+          onClick={() => ref.current?.close()}
+        >
+          <X className="icon" strokeWidth={1.75} aria-hidden="true" />
+        </button>
+      </header>
+      <div className="source-management-body">{children}</div>
+    </dialog>
+  );
+}
+function SendButton({ disabled, count }: { disabled: boolean; count: number }) {
+  const { pending } = useFormStatus();
+  return (
+    <button className="solid-button" disabled={disabled || pending}>
+      {pending ? '正在提交…' : `推送至 ${count} 个邮箱`}
+    </button>
+  );
+}
+function RetrySendButton({ disabled }: { disabled: boolean }) {
+  const { pending } = useFormStatus();
+  return (
+    <button className="quiet-button" disabled={disabled || pending}>
+      {pending ? '正在提交…' : '重新推送'}
+    </button>
+  );
+}
+const states: Record<string, string> = {
+  pending: '待发送',
+  sending: '发送中',
+  sent: '已发送',
+  failed: '发送失败',
+  uncertain: '结果待确认',
+};
+const recipientStates: Record<Recipient['status'], string> = {
+  registered: '订阅中',
+  unsubscribed: '已退订',
+  pending: '待确认',
+  expired: '已过期',
+};
+export function SubscriptionDelivery({
+  recipients,
+  issues,
+  sends,
+  configError,
+  mailConnection,
+  deliveryEnabled,
+  active,
+  historyPagination,
+}: {
+  recipients: Recipient[];
+  issues: Issue[];
+  sends: Send[];
+  configError: string | null;
+  mailConnection: PublicMailConnection;
+  deliveryEnabled: boolean;
+  active: 'subscribers' | 'history';
+  historyPagination: { page: number; pages: number; total: number };
+}) {
+  const [modal, setModal] = useState<'add' | 'send' | 'config' | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [briefId, setBriefId] = useState('');
+  const available = recipients.filter(
+    (r): r is Recipient & { id: string; status: 'registered' } => r.status === 'registered',
+  );
+  return (
+    <>
+      <div className="subscription-toolbar">
+        <button className="solid-button" onClick={() => setModal('add')}>
+          <UserPlus className="icon" strokeWidth={1.75} aria-hidden="true" />
+          添加订阅
+        </button>
+        <button className="outline-button" onClick={() => setModal('send')}>
+          <Send className="icon" strokeWidth={1.75} aria-hidden="true" />
+          手动推送
+        </button>
+        <button className="outline-button" onClick={() => setModal('config')}>
+          <Settings className="icon" strokeWidth={1.75} aria-hidden="true" />
+          推送配置
+        </button>
+        <GlobalSwitch setting="deliveryEnabled" label="启动推送" enabled={deliveryEnabled} />
+      </div>
+      {deliveryEnabled && configError && <p className="form-hint">发信配置未就绪</p>}
+      {modal === 'config' && (
+        <Modal title="推送配置" close={() => setModal(null)}>
+          <MailSettingsForm connection={mailConnection} onSaved={() => setModal(null)} />
+        </Modal>
+      )}
+      <SubscriptionTabs active={active} />
+      {active === 'subscribers' ? (
+        <>
+          <div className="table-wrap subscription-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>邮箱</th>
+                  <th>记录时间</th>
+                  <th>状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recipients.map((row) => (
+                  <tr key={row.email}>
+                    <td>{row.email}</td>
+                    <td>{row.at}</td>
+                    <td>
+                      <span className={`subscription-state ${row.status}`}>
+                        {recipientStates[row.status]}
+                      </span>
+                      {row.status === 'pending' && row.expiresAt && (
+                        <p className="form-hint">有效期至 {row.expiresAt}</p>
+                      )}
+                    </td>
+                    <td>
+                      <div className="row-actions subscription-actions">
+                        {row.status === 'registered' && row.id && (
+                          <form action={cancelSubscriberAction}>
+                            <input type="hidden" name="id" value={row.id} />
+                            <button className="quiet-button">取消订阅</button>
+                          </form>
+                        )}
+                        {row.status === 'unsubscribed' && row.id && (
+                          <form action={removeSubscriberAction}>
+                            <input type="hidden" name="id" value={row.id} />
+                            <button className="quiet-button">删除记录</button>
+                          </form>
+                        )}
+                        {(row.status === 'pending' || row.status === 'expired') && (
+                          <form action={resendSubscriptionConfirmationAction}>
+                            <input type="hidden" name="email" value={row.email} />
+                            <button className="quiet-button">重发确认</button>
+                          </form>
+                        )}
+                        {row.status === 'expired' && (
+                          <form action={deleteExpiredSubscriberAction}>
+                            <input type="hidden" name="email" value={row.email} />
+                            <button className="quiet-button">删除记录</button>
+                          </form>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!recipients.length && <p className="empty-state">暂无订阅登记。</p>}
+        </>
+      ) : (
+        <>
+          <div className="table-wrap subscription-table delivery-history-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>邮箱</th>
+                  <th>刊期</th>
+                  <th>推送时间</th>
+                  <th>状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sends.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.email}</td>
+                    <td>
+                      <a href={`/briefs/${row.briefId}`}>{row.issue}</a>
+                    </td>
+                    <td>{row.createdAt}</td>
+                    <td>
+                      {states[row.state] ?? row.state}
+                      {row.error && <p className="form-hint">{row.error}</p>}
+                    </td>
+                    <td>
+                      {row.state === 'failed' ? (
+                        <div className="row-actions subscription-actions">
+                          <form action={retryDeliveryAction}>
+                            <input type="hidden" name="id" value={row.id} />
+                            <input type="hidden" name="page" value={historyPagination.page} />
+                            <RetrySendButton
+                              disabled={!deliveryEnabled || !!configError || !row.recipientActive}
+                            />
+                            {(!row.recipientActive || !deliveryEnabled || configError) && (
+                              <p className="form-hint">
+                                {!row.recipientActive
+                                  ? '该邮箱已退订'
+                                  : !deliveryEnabled
+                                    ? '请先开启推送'
+                                    : '请先完善推送配置'}
+                              </p>
+                            )}
+                          </form>
+                        </div>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!sends.length && <p className="empty-state">暂无推送记录。</p>}
+          <nav className="pagination" aria-label="推送记录分页">
+            <span>
+              共{historyPagination.total}条 · 第{historyPagination.page}/{historyPagination.pages}页
+            </span>
+            {historyPagination.page > 1 ? (
+              <Link href={`/admin/subscriptions/history?page=${historyPagination.page - 1}`}>
+                上一页
+              </Link>
+            ) : (
+              <span aria-disabled="true">上一页</span>
+            )}
+            {historyPagination.page < historyPagination.pages ? (
+              <Link href={`/admin/subscriptions/history?page=${historyPagination.page + 1}`}>
+                下一页
+              </Link>
+            ) : (
+              <span aria-disabled="true">下一页</span>
+            )}
+          </nav>
+        </>
+      )}
+      {modal === 'add' && (
+        <Modal title="添加订阅" close={() => setModal(null)}>
+          <form action={addSubscriberAction} className="stack-form subscription-modal-form">
+            <label>
+              邮箱
+              <input name="email" type="email" maxLength={254} required />
+            </label>
+            <input type="hidden" name="kinds" value="daily" />
+            <button className="solid-button">添加订阅</button>
+          </form>
+        </Modal>
+      )}
+      {modal === 'send' && (
+        <Modal title="手动推送" close={() => setModal(null)}>
+          <form action={manualDeliveryAction} className="stack-form subscription-modal-form">
+            <label>
+              推送刊期
+              <select
+                name="briefId"
+                value={briefId}
+                onChange={(e) => setBriefId(e.target.value)}
+                required
+              >
+                <option value="">{issues.length ? '选择已发布刊期' : '暂无已发布刊期'}</option>
+                {issues.map((issue) => (
+                  <option key={issue.id} value={issue.id}>
+                    {issue.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {briefId && (
+              <a href={`/briefs/${briefId}`} target="_blank" rel="noreferrer">
+                查看本期内容
+              </a>
+            )}
+            <fieldset>
+              <legend>推送邮箱</legend>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  disabled={!available.length}
+                  checked={available.length > 0 && selected.length === available.length}
+                  onChange={(e) => setSelected(e.target.checked ? available.map((r) => r.id) : [])}
+                />
+                全选
+              </label>
+              <div className="subscription-recipients">
+                {available.map((row) => (
+                  <label className="check" key={row.id}>
+                    <input
+                      type="checkbox"
+                      name="subscriptionIds"
+                      value={row.id}
+                      checked={selected.includes(row.id)}
+                      onChange={(e) =>
+                        setSelected(
+                          e.target.checked
+                            ? [...selected, row.id]
+                            : selected.filter((id) => id !== row.id),
+                        )
+                      }
+                    />
+                    {row.email}
+                  </label>
+                ))}
+              </div>
+              {!available.length && <p className="muted">暂无可推送邮箱。</p>}
+            </fieldset>
+            <label className="check">
+              <input type="checkbox" name="force" />
+              重新推送已发送或结果待确认的邮件
+            </label>
+            {(!deliveryEnabled || configError) && (
+              <p className="form-hint">
+                {!deliveryEnabled ? '推送已关闭，请先开启推送。' : configError}
+              </p>
+            )}
+            <SendButton
+              disabled={!deliveryEnabled || !!configError || !briefId || !selected.length}
+              count={selected.length}
+            />
+          </form>
+        </Modal>
+      )}
+    </>
+  );
+}

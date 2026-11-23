@@ -1,0 +1,61 @@
+{
+  "name": "industry-brief-starter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.11"
+  },
+  "scripts": {
+    "predev": "npm run db:migrate",
+    "dev": "node --env-file-if-exists=.env scripts/dev.mjs",
+    "predev:web": "npm run db:migrate",
+    "dev:web": "next dev -p 3100",
+    "dev:worker": "tsx watch --env-file-if-exists=.env src/worker.ts",
+    "build": "next build",
+    "package": "bash scripts/package-release.sh",
+    "package:full": "bash scripts/package-release.sh --full",
+    "prestart": "npm run db:migrate",
+    "start": "next start -p 3100",
+    "worker": "tsx --env-file-if-exists=.env src/worker.ts",
+    "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
+    "mail:verify": "tsx --env-file-if-exists=.env scripts/verify-mail.ts",
+    "sources:setup": "tsx --env-file-if-exists=.env scripts/setup-sources.ts",
+    "sources:verify": "tsx --env-file-if-exists=.env scripts/verify-sources.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --env-file-if-exists=.data/test.env --test --test-concurrency=1 tests/*.test.ts",
+    "test:browser": "playwright test",
+    "test:deploy": "python3 -m unittest discover -s tests -p deployment_test.py",
+    "docs:build": "node scripts/build-docs.mjs",
+    "check": "npm run typecheck && npm test && npm run test:deploy && npm run build",
+    "format": "prettier --write src scripts tests *.ts *.json *.md docs",
+    "format:check": "prettier --check src scripts tests *.ts *.json *.md docs"
+  },
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "drizzle-orm": "0.45.4",
+    "lucide-react": "^1.65.0",
+    "next": "16.4.2",
+    "nodemailer": "10.2.1",
+    "pdfjs-dist": "^6.4.299",
+    "pg": "^8.16.3",
+    "pg-boss": "12.38.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "rss-parser": "^3.13.0",
+    "tsx": "^4.21.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^24.10.0",
+    "@types/nodemailer": "^7.0.4",
+    "@types/pg": "^8.15.6",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "marked": "^18.2.0",
+    "mermaid": "^12.3.0",
+    "prettier": "^3.9.10",
+    "typescript": "7.0.2"
+  }
+}
