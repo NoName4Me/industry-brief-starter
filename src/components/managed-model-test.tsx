@@ -15,10 +15,24 @@ export function ManagedModelTest({ id }: { id: string }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id }),
       });
-      const body = await response.json();
-      setResult(body);
-    } catch {
-      setResult({ ok: false, response: '连接测试失败' });
+      const raw = await response.text();
+      try {
+        const body = JSON.parse(raw) as { ok?: boolean; response?: string };
+        setResult({
+          ok: body.ok === true,
+          response: body.response || `连接测试失败：HTTP ${response.status}`,
+        });
+      } catch {
+        setResult({
+          ok: false,
+          response: `连接测试失败：HTTP ${response.status}${raw ? ` · ${raw.slice(0, 300)}` : ''}`,
+        });
+      }
+    } catch (error) {
+      setResult({
+        ok: false,
+        response: error instanceof Error ? `连接测试失败：${error.message}` : '连接测试失败',
+      });
     } finally {
       setPending(false);
     }

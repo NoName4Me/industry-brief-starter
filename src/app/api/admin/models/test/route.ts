@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { isAdmin } from '../../../../../server/auth.ts';
 import { testManagedModel } from '../../../../../server/model-config.ts';
+import { modelFailureStatus } from '../../../../../server/model-errors.ts';
 
 export async function POST(request: Request) {
   if (!(await isAdmin()))
@@ -34,7 +35,7 @@ export async function POST(request: Request) {
   } catch (error) {
     return NextResponse.json(
       { ok: false, response: error instanceof Error ? error.message : '连接失败' },
-      { status: 400, headers: { 'Cache-Control': 'no-store' } },
+      { status: modelFailureStatus(error), headers: { 'Cache-Control': 'no-store' } },
     );
   }
 }

@@ -13,6 +13,7 @@ import {
   updateModelRoute,
 } from './model-health.ts';
 import type { ModelConnectionEntry } from './types.ts';
+import { modelFailureKind, modelHttpFailure, modelTransportFailure } from './model-errors.ts';
 export function modelConfig(connection?: { baseUrl: string; apiKey: string; model: string }) {
   const baseUrl = (connection?.baseUrl ?? process.env.LLM_BASE_URL)?.trim();
   const apiKey = (connection?.apiKey ?? process.env.LLM_API_KEY)?.trim();
@@ -89,6 +90,9 @@ function classifyAvailabilityError(error: unknown) {
   if (error instanceof ModelUnavailableError) return error.category;
   if (error instanceof z.ZodError) return null;
   if (error instanceof SyntaxError) return null;
+  const failureKind = modelFailureKind(error);
+  if (failureKind === 'timeout') return 'timeout';
+  if (failureKind === 'network') return 'network';
   const status =
     error && typeof error === 'object' && 'status' in error
       ? Number((error as { status?: unknown }).status)
@@ -200,6 +204,10 @@ async function requestModelWithFailover<T>(
           Date.now() - started,
         ],
       );
+      if (category)
+        console.error(
+          `[模型调用] ${entry.name}（${entry.model}）失败 · ${category}${status ? ` HTTP ${status}` : ''} · ${message}`,
+        );
       if (category) {
         await recordModelFailure({
           modelId: entry.id,
@@ -236,23 +244,26 @@ export async function requestModel<T>(
   let outputTokens = 0;
   let attemptLimit = 2;
   for (let attempt = 1; attempt <= attemptLimit; attempt++) {
-    const response = await fetcher(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
-      body: JSON.stringify({
-        model: config.model,
-        stream: false,
-        reasoning_effort: 'low',
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' },
-        messages,
-      }),
-      signal: AbortSignal.timeout(180_000),
-    });
-    if (!response.ok)
-      throw Object.assign(new Error(`模型请求失败：HTTP ${response.status}`), {
-        status: response.status,
+    const endpoint = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+    let response: Response;
+    try {
+      response = await fetcher(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+        body: JSON.stringify({
+          model: config.model,
+          stream: false,
+          reasoning_effort: 'low',
+          max_tokens: maxTokens,
+          response_format: { type: 'json_object' },
+          messages,
+        }),
+        signal: AbortSignal.timeout(180_000),
       });
+    } catch (error) {
+      throw modelTransportFailure(error, endpoint, '模型请求失败', config.apiKey);
+    }
+    if (!response.ok) throw await modelHttpFailure(response, '模型请求失败', config.apiKey);
     const body = z
       .object({
         choices: z
@@ -351,21 +362,27 @@ export async function probeUnavailableModels(fetcher: typeof fetch = fetch, now 
     const attemptId = Number(attempt.rows[0].id);
     try {
       const config = modelConfig(entry);
-      const response = await fetcher(`${config.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
-        body: JSON.stringify({
-          model: config.model,
-          stream: false,
-          max_tokens: 8,
-          messages: [{ role: 'user', content: 'reply ok' }],
-        }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!response.ok)
-        throw Object.assign(new Error(`恢复探测失败：HTTP ${response.status}`), {
-          status: response.status,
+      const endpoint = `${config.baseUrl}/chat/completions`;
+      let response: Response;
+      try {
+        response = await fetcher(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${config.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: config.model,
+            stream: false,
+            max_tokens: 8,
+            messages: [{ role: 'user', content: 'reply ok' }],
+          }),
+          signal: AbortSignal.timeout(30_000),
         });
+      } catch (error) {
+        throw modelTransportFailure(error, endpoint, '恢复探测失败', config.apiKey);
+      }
+      if (!response.ok) throw await modelHttpFailure(response, '恢复探测失败', config.apiKey);
       const body = z
         .object({
           choices: z
@@ -409,6 +426,7 @@ export async function probeUnavailableModels(fetcher: typeof fetch = fetch, now 
       results.push({ modelId: entry.id, ok: true, recovered: result.recovered });
     } catch (error) {
       const message = error instanceof Error ? error.message : '恢复探测失败';
+      console.error(`[模型恢复探测] ${entry.name}（${entry.model}）失败 · ${message}`);
       const status =
         error && typeof error === 'object' && 'status' in error
           ? Number((error as { status?: unknown }).status)

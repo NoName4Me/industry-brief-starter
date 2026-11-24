@@ -7106,11 +7106,14 @@ button:disabled {
   font-size: 11px;
 }
 .model-row-actions > [role='status'] small {
+  display: -webkit-box;
   overflow: hidden;
   color: var(--body);
   font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 .model-empty,
 .model-panel-empty {

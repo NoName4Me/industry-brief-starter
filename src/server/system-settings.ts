@@ -2,6 +2,7 @@ import { getSettings, saveSettingsPatch } from './settings.ts';
 import { getModelConnection, modelConfig } from './model.ts';
 import { pool } from './db.ts';
 import { recordModelFailure, recordModelSuccess } from './model-health.ts';
+import { modelHttpFailure, modelTransportFailure } from './model-errors.ts';
 
 const text = (form: FormData, name: string) => String(form.get(name) ?? '').trim();
 export async function connectionFromForm(form: FormData) {
@@ -52,6 +53,7 @@ export async function saveSystemSettings(form: FormData) {
 }
 export async function testModelConnection(form: FormData, fetcher: typeof fetch = fetch) {
   const config = modelConfig(await connectionFromForm(form));
+  const endpoint = `${config.baseUrl}/chat/completions`;
   const modelConfigId = text(form, 'modelConfigId') || null;
   const modelDisplayName = text(form, 'modelDisplayName') || config.model;
   const settings = await getSettings();
@@ -86,18 +88,23 @@ export async function testModelConnection(form: FormData, fetcher: typeof fetch 
       )
     : null;
   try {
-    const response = await fetcher(`${config.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
-      body: JSON.stringify({
-        model: config.model,
-        stream: false,
-        max_tokens: 256,
-        messages: [{ role: 'user', content: '测试' }],
-      }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok) throw new Error(`连接失败：HTTP ${response.status}`);
+    let response: Response;
+    try {
+      response = await fetcher(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+        body: JSON.stringify({
+          model: config.model,
+          stream: false,
+          max_tokens: 256,
+          messages: [{ role: 'user', content: '测试' }],
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (error) {
+      throw modelTransportFailure(error, endpoint, '连接失败', config.apiKey);
+    }
+    if (!response.ok) throw await modelHttpFailure(response, '连接失败', config.apiKey);
     const body = await response.json();
     const result = body.choices?.[0]?.message?.content;
     if (typeof result !== 'string' || !result.trim()) throw new Error('模型未返回正文');
@@ -119,6 +126,9 @@ export async function testModelConnection(form: FormData, fetcher: typeof fetch 
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : '连接失败';
+    console.error(
+      `[模型测试] ${modelDisplayName}（${config.model}）失败 · ${endpoint} · ${message}`,
+    );
     await pool.query(
       "UPDATE model_calls SET state='failed',finished_at=now(),error=$2 WHERE id=$1",
       [id, message],

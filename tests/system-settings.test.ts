@@ -6,6 +6,7 @@ import { getSettings, saveSettings, saveSettingsPatch } from '../src/server/sett
 import { defaultSettings } from '../src/server/types.ts';
 import { requireModelConfig, inspectModelRequest, modelUsage } from '../src/server/model.ts';
 import { saveSystemSettings, testModelConnection } from '../src/server/system-settings.ts';
+import { modelFailureStatus } from '../src/server/model-errors.ts';
 
 if (!process.env.DATABASE_URL || !/_test$/.test(new URL(process.env.DATABASE_URL).pathname))
   throw new Error('必须使用独立_test数据库');
@@ -98,7 +99,9 @@ test('连通测试发送当前表单的测试，不修改已保存配置，成�
   assert.deepEqual((await getSettings()).modelConnection, connection);
   assert.equal((await modelUsage()).used, 1);
   await assert.rejects(
-    testModelConnection(data, async () => new Response('', { status: 401 })),
+    testModelConnection(data, async () =>
+      Response.json({ error: { message: 'invalid stored-test-key' } }, { status: 401 }),
+    ),
     /HTTP 401/,
   );
   assert.equal((await modelUsage()).used, 2);
@@ -118,5 +121,36 @@ test('连通测试发送当前表单的测试，不修改已保存配置，成�
       throw new Error('不应调用');
     }),
     /已达上限/,
+  );
+});
+test('连通测试带回上游错误详情，并区分网络失败', async () => {
+  const data = form();
+  data.set('modelBaseUrl', 'https://temporary.invalid/v1');
+  await assert.rejects(
+    testModelConnection(data, async () =>
+      Response.json(
+        { error: { message: '模型 unsaved-model 不存在，请检查模型名称' } },
+        { status: 400 },
+      ),
+    ),
+    (error) => {
+      assert.match((error as Error).message, /HTTP 400/);
+      assert.match((error as Error).message, /模型 unsaved-model 不存在/);
+      assert.equal(modelFailureStatus(error), 502);
+      return true;
+    },
+  );
+  await assert.rejects(
+    testModelConnection(data, async () => {
+      throw new TypeError('fetch failed', {
+        cause: { code: 'UND_ERR_SOCKET', message: 'other side closed' },
+      });
+    }),
+    (error) => {
+      assert.match((error as Error).message, /无法连接 https:\/\/temporary\.invalid\/v1/);
+      assert.match((error as Error).message, /UND_ERR_SOCKET/);
+      assert.equal(modelFailureStatus(error), 502);
+      return true;
+    },
   );
 });

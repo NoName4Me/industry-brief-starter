@@ -210,6 +210,21 @@ test('系统设置与模型管理拆分保存，模型可测试，桌面和手�
       (await primaryTestButton.boundingBox())!.y + (await primaryTestButton.boundingBox())!.height,
     );
     await page.screenshot({ path: '.data/model-test-result-row-1440.png', fullPage: true });
+    await page.route('**/api/admin/models/test', (route) =>
+      route.fulfill({
+        status: 502,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: false,
+          response: '连接失败：HTTP 400 · 模型 configured-model 不存在',
+        }),
+      }),
+    );
+    await primaryTestButton.click();
+    await expect(testResult.locator('strong')).toHaveText('失败');
+    await expect(testResult.locator('small')).toHaveText(
+      '连接失败：HTTP 400 · 模型 configured-model 不存在',
+    );
     expect(received).toMatchObject({
       model: 'configured-model',
       messages: [{ role: 'user', content: '测试' }],
