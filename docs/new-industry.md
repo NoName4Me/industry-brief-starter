@@ -5,6 +5,9 @@
 ```bash
 mkdir ../new-industry-brief
 git ls-files --cached --others --exclude-standard -z \
+  | while IFS= read -r -d '' path; do
+      if [ -e "$path" ] || [ -L "$path" ]; then printf '%s\0' "$path"; fi
+    done \
   | tar -cf - --null -T - \
   | tar -xf - -C ../new-industry-brief
 cd ../new-industry-brief
