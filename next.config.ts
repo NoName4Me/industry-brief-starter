@@ -10,6 +10,9 @@ const config: NextConfig = {
   output: 'standalone',
   allowedDevOrigins: localDevHosts,
   poweredByHeader: false,
+  experimental: {
+    agentUpgrade: 'security',
+  },
   async headers() {
     return [
       {
